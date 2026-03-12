@@ -664,7 +664,56 @@ at::Tensor spyre_copy_from(const at::Tensor& self, const at::Tensor& dst,
     return dst;
 
   } else if (self.is_privateuseone() && dst.is_cpu()) {
-    copy_device_to_host(self, dst);
+    // Check for broadcast (stride-0) dimensions created by expand().
+    // The DCI cannot handle stride-0.Work around this by copying
+    // the base shape to CPU first, then expanding on the host.
+    bool has_broadcast = false;
+    for (int64_t i = 0; i < self.dim(); i++) {
+      if (self.stride(i) == 0 && self.size(i) > 1) {
+        has_broadcast = true;
+        break;
+      }
+    }
+
+    if (has_broadcast) {
+      // Derive the base (unexpanded) sizes — replace broadcast dims
+      // with 1.
+      std::vector<int64_t> base_sizes;
+      for (int64_t i = 0; i < self.dim(); i++) {
+        base_sizes.push_back(
+            (self.stride(i) == 0 && self.size(i) > 1) ? 1 : self.size(i));
+      }
+
+      // Compute strides for the base shape.
+      std::vector<int64_t> base_strides(base_sizes.size());
+      int64_t stride = 1;
+      for (int64_t i = static_cast<int64_t>(base_sizes.size()) - 1; i >= 0;
+           i--) {
+        base_strides[i] = stride;
+        stride *= base_sizes[i];
+      }
+
+      // Create a Spyre view with the base shape sharing the same
+      // storage and device layout.
+      SpyreTensorLayout stl = get_spyre_tensor_layout(self);
+      auto base_view = at::detail::make_tensor<SpyreTensorImpl>(
+          c10::TensorImpl::VIEW, c10::Storage(self.storage()),
+          self.key_set(), self.dtype());
+      auto* base_impl = base_view.unsafeGetTensorImpl();
+      base_impl->set_storage_offset(self.storage_offset());
+      base_impl->set_sizes_and_strides(base_sizes, base_strides);
+      static_cast<SpyreTensorImpl*>(base_impl)->spyre_layout = stl;
+
+      // Copy the base shape device to host.
+      auto base_cpu =
+          at::empty(base_sizes, dst.options().device(c10::kCPU));
+      copy_device_to_host(base_view, base_cpu);
+
+      // Expand on CPU and copy into the destination.
+      dst.copy_(base_cpu.expand(self.sizes()));
+    } else {
+      copy_device_to_host(self, dst);
+    }
     return dst;
 
   } else if (self.is_privateuseone() && dst.is_privateuseone()) {

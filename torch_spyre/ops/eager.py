@@ -307,4 +307,72 @@ def spyre__uniform_(self, from_=0.0, to=1.0, generator=None):
     return self
 
 
+def infer_expand_geometry(
+    tensor: torch.Tensor,
+    new_sizes: tuple[int, ...],
+) -> tuple[tuple[int, ...], tuple[int, ...], SpyreTensorLayout]:
+    """Compute sizes, strides, and layout for expand.
+
+    Unlike view/reshape, expand introduces broadcast (stride-0)
+    dimensions.  The physical device data is unchanged so the
+    SpyreTensorLayout is kept as-is.
+    """
+    old_sizes = list(tensor.size())
+    old_strides = list(tensor.stride())
+
+    ndim_diff = len(new_sizes) - len(old_sizes)
+
+    # Pad with leading size-1 / stride-0 dims for the new leading axes
+    sizes = [1] * ndim_diff + old_sizes
+    strides = [0] * ndim_diff + old_strides
+
+    result_sizes: list[int] = []
+    result_strides: list[int] = []
+
+    for i, (old_size, old_stride, new_size) in enumerate(
+        zip(sizes, strides, new_sizes)
+    ):
+        if new_size == -1:
+            # -1 means "keep the original size"
+            result_sizes.append(old_size)
+            result_strides.append(old_stride)
+        elif old_size == new_size:
+            result_sizes.append(old_size)
+            result_strides.append(old_stride)
+        elif old_size == 1:
+            # Broadcast dimension
+            result_sizes.append(new_size)
+            result_strides.append(0)
+        else:
+            raise RuntimeError(
+                f"The expanded size of the tensor ({new_size}) "
+                f"must match the existing size ({old_size}) at "
+                f"non-singleton dimension {i}"
+            )
+
+    # Physical device data is unchanged — keep the current layout.
+    current_layout: SpyreTensorLayout = (
+        tensor.device_tensor_layout()
+    )  # type:ignore
+    assert isinstance(current_layout, SpyreTensorLayout)
+    return tuple(result_sizes), tuple(result_strides), current_layout
+
+
+@torch.library.register_kernel(
+    "aten::expand", ["spyre"]
+)  # type:ignore
+def spyre__expand_default(
+    self: torch.Tensor,
+    size: list[int],
+    implicit: bool = False,
+) -> torch.Tensor:
+    new_sizes = tuple(size)
+    sizes, strides, new_stl = infer_expand_geometry(self, new_sizes)
+
+    result = as_strided_with_layout(
+        self, sizes, strides, self.storage_offset(), new_stl
+    )
+    return result
+
+
 # INSERT_CODEGEN_HERE

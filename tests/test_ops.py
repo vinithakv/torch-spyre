@@ -174,6 +174,19 @@ class TestOps(TestCase):
         y = x_spyre.permute(1, 0).to("cpu")
         torch.testing.assert_close(y, x.permute(1, 0), rtol=self.rtol, atol=self.atol)
 
+    def test_expand_2d(self):
+        x = torch.tensor([[1, -2, 3], [4, 5, 6]], dtype=self.dtype)
+        x = x.unsqueeze(1)   # (2,1,3)
+        x_spyre = x.to("spyre")
+        y_spyre = x_spyre.expand(2, 4, 3)
+        y = y_spyre.to("cpu")
+        torch.testing.assert_close(
+            y,
+            x.expand(2,4,3),
+            rtol=self.rtol,
+            atol=self.atol
+        )
+
     def test_bool(self):
         dtype = torch.bool
         x = torch.randint(0, 2, (2, 64), dtype=dtype)
